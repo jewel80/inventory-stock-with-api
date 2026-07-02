@@ -1,0 +1,64 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Product {
+  id             Int       @id @default(autoincrement())
+  supplier_id    Int       @unique
+  title          String
+  brand          String?
+  category       String
+  price          Decimal   @db.Decimal(10, 2)
+  supplier_stock Int       @default(0)
+  internal_stock Int       @default(0)
+  threshold      Int?
+  thumbnail_url  String?
+  status         String    @default("in_stock")
+  last_synced_at DateTime?
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @updatedAt
+
+  reorders Reorder[]
+
+  @@map("products")
+}
+
+model Reorder {
+  id                 Int       @id @default(autoincrement())
+  product_id         Int
+  quantity_requested Int
+  status             String    @default("requested")
+  requested_by       String
+  created_at         DateTime  @default(now())
+  updated_at         DateTime  @updatedAt
+  received_at        DateTime?
+
+  product Product @relation(fields: [product_id], references: [id])
+
+  @@map("reorders")
+}
+
+model SyncLog {
+  id               Int       @id @default(autoincrement())
+  started_at       DateTime  @default(now())
+  finished_at      DateTime?
+  products_created Int       @default(0)
+  products_updated Int       @default(0)
+  errors           String?
+
+  @@map("sync_logs")
+}
+
+model User {
+  id         Int      @id @default(autoincrement())
+  username   String   @unique
+  password   String
+  created_at DateTime @default(now())
+
+  @@map("users")
+}
