@@ -27,9 +27,13 @@ services:
       - ./backend/src:/app/src
       - ./backend/prisma:/app/prisma
       - ./backend/scripts:/app/scripts
-      # Anonymous volume: keep the container's node_modules (don't shadow it
-      # with the host's, which may have wrong-platform native binaries).
-      - /app/node_modules
+      # NOTE: deliberately NO /app/node_modules volume. Only src/prisma/scripts
+      # are bind-mounted (not the whole backend dir), so the host's node_modules
+      # never shadows the container's. The container therefore uses the image's
+      # node_modules directly → a rebuild takes effect instantly, with no stale
+      # anonymous/named volume caching old deps. (That stale cache is what caused
+      # "nodemon: not found" after switching to the dev build.) For dependency
+      # changes, rebuild:   docker compose up -d --build backend
     ports:
       - "8000:8000"
       - "9229:9229"   # Node inspector — attach a debugger if needed
