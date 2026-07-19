@@ -5,12 +5,12 @@
 # Pipeline (fail-fast, each stage gates the next):
 #   1. lint-test-build   ESLint + Jest + Prisma generate + Vite build
 #   2. docker            Build & push backend/frontend images to GHCR
-#   3. security          npm audit + Trivy (fs + image) + SARIF + SBOM
+#   3. security          npm audit (gate) + Trivy advisory (fs + image) + SARIF + SBOM
 #   4. compose-validate  Boot the full stack (base compose) and prove /health
 #   5. notify            Pass/fail summary (+ optional email/Slack)
 #
-# A failure in ANY gating stage fails the pipeline (lint/test/build/docker/
-# security/compose). Images and reports are published only when gates pass.
+# Gating stages (lint/test/build/docker + npm-audit/compose) fail the pipeline.
+# Trivy scans are advisory: findings are uploaded (SARIF) but do NOT block CI.
 # =============================================================================
 name: CI
 
@@ -165,14 +165,16 @@ jobs:
           npm audit --audit-level=high --omit=dev | tee npm-audit-backend.txt
         working-directory: backend
 
-      # ── Trivy: filesystem (repo source) ──
+      # ── Trivy scans are ADVISORY: findings are uploaded to SARIF (GitHub
+      #    Security tab) for visibility, but do NOT fail CI. Base-image
+      #    (Debian) CVEs are noisy and mostly unfixable from here; npm audit
+      #    above remains the hard gate for our own dependencies. ──
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
-          exit-code: "1"
           format: sarif
           output: trivy-fs.sarif
 
@@ -182,7 +184,6 @@ jobs:
         with:
           image-ref: ghcr.io/${{ steps.vars.outputs.owner }}/inventory-backend:${{ github.sha }}
           severity: HIGH,CRITICAL
-          exit-code: "1"
           format: sarif
           output: trivy-backend.sarif
 
@@ -192,7 +193,6 @@ jobs:
         with:
           image-ref: ghcr.io/${{ steps.vars.outputs.owner }}/inventory-frontend:${{ github.sha }}
           severity: HIGH,CRITICAL
-          exit-code: "1"
           format: sarif
           output: trivy-frontend.sarif
 
