@@ -34,7 +34,42 @@ services:
       - "8000:8000"
       - "9229:9229"   # Node inspector — attach a debugger if needed
 
-  # Frontend keeps its production nginx build in Docker. For true HMR during
-  # development, run the Vite dev server on the host instead:
-  #     cd frontend && npm install && npm run dev
-  # (vite.config.js already proxies /api → http://localhost:8000).
+  # ── Frontend: Vite dev server with HMR (replaces the nginx production build) ─
+  # In dev we run Vite directly so edits to frontend/src hot-reload in the
+  # browser instantly — no image rebuild, no manual refresh. The production
+  # path (`docker compose -f docker-compose.yml up -d --build`) does NOT load
+  # this override, so it still serves the multi-stage nginx image, untouched.
+  #
+  # `build:` is reset below, so dev never builds the nginx image — it just
+  # pulls `node:22-slim`. Start with `docker compose up` (or `-d`).
+  frontend:
+    build: !reset null # drop the base nginx build; dev uses the node image directly
+    image: node:22-slim
+    working_dir: /app
+    # node:22-slim ships no node_modules; install (cached by the named volume
+    # below), then start Vite. vite.config.js binds 0.0.0.0:9000 + HMR.
+    command: sh -c "npm install --no-audit --no-fund && npm run dev"
+    environment:
+      NODE_ENV: development
+      # Vite proxies /api to the backend container on the appnet bridge network
+      # (NOT localhost:8000, which would be the frontend container itself).
+      API_PROXY_TARGET: http://backend:8000
+    volumes:
+      # Live source → HMR without rebuilding the image.
+      - ./frontend:/app
+      # Named volume: keep the container's node_modules (don't shadow it with
+      # the host's, which may have wrong-platform native binaries). Named so it
+      # survives `docker compose down` and isn't reinstalled on every restart.
+      - frontend_node_modules:/app/node_modules
+    ports: !override # REPLACE the base ports list, else host :9000 is bound twice
+      - "9000:9000" # host 9000 → Vite dev server (same URL as prod: :9000)
+    # The base nginx healthcheck (wget against :8080) is wrong for Vite; drop it.
+    healthcheck:
+      disable: true
+    depends_on:
+      backend:
+        condition: service_healthy
+
+# Named volume for the frontend container's node_modules — survives `down`.
+volumes:
+  frontend_node_modules:
