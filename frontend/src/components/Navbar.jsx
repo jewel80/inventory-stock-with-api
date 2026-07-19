@@ -15,7 +15,7 @@ export default function Navbar() {
     <nav className="navbar">
       <div className="navbar-brand">
         <span className="brand-mark">IS</span>
-        <span>InventoryStock</span>
+        <span>Inventory Operations Dashboard</span>
       </div>
       <div className="navbar-links">
         <NavLink to="/" end className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
