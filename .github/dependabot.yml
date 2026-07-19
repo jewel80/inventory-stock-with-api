@@ -1,0 +1,40 @@
+# Dependabot keeps actions, base images, and npm dependencies current.
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates
+version: 2
+updates:
+  # GitHub Actions used in CI
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      ci-actions:
+        patterns: ["*"]
+
+  # Backend Docker base image (node:22-slim)
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+
+  # Frontend Docker base image (builder + nginx-unprivileged)
+  - package-ecosystem: "docker"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+
+  # Backend npm dependencies
+  - package-ecosystem: "npm"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Frontend npm dependencies
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

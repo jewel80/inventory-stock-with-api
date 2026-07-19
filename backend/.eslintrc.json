@@ -1,0 +1,24 @@
+{
+  "root": true,
+  "env": {
+    "node": true,
+    "es2022": true,
+    "jest": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "script"
+  },
+  "ignorePatterns": ["node_modules/", "dist/", "coverage/"],
+  "extends": ["eslint:recommended"],
+  "rules": {
+    "no-unused-vars": [
+      "warn",
+      {
+        "argsIgnorePattern": "^next$",
+        "varsIgnorePattern": "^_"
+      }
+    ],
+    "no-console": "off"
+  }
+}

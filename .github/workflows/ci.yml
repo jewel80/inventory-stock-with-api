@@ -1,0 +1,337 @@
+# =============================================================================
+# Production-grade CI/CD for inventory-stock-with-api
+#
+# Triggers on push to development-dev (primary dev branch) and on PRs.
+# Pipeline (fail-fast, each stage gates the next):
+#   1. lint-test-build   ESLint + Jest + Prisma generate + Vite build
+#   2. docker            Build & push backend/frontend images to GHCR
+#   3. security          npm audit + Trivy (fs + image) + SARIF + SBOM
+#   4. compose-validate  Boot the full stack (base compose) and prove /health
+#   5. notify            Pass/fail summary (+ optional email/Slack)
+#
+# A failure in ANY gating stage fails the pipeline (lint/test/build/docker/
+# security/compose). Images and reports are published only when gates pass.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [development-dev]
+  pull_request:
+    branches: [development-dev, main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ─── 1. Lint + Test + Build ─────────────────────────────────────────────────
+  lint-test-build:
+    name: Lint, Test & Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 (with npm cache)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      # ── Backend: install, lint, test, generate Prisma client ──
+      - name: Backend — install
+        run: npm ci
+        working-directory: backend
+
+      - name: Backend — lint
+        run: npm run lint
+        working-directory: backend
+
+      - name: Backend — test
+        run: npm test
+        working-directory: backend
+
+      - name: Backend — generate Prisma client (schema validation)
+        run: npx prisma generate
+        working-directory: backend
+        env:
+          DATABASE_URL: "postgresql://user:password@localhost:5432/db"
+
+      # ── Frontend: install + production build (the "build" stage) ──
+      - name: Frontend — install
+        run: npm ci
+        working-directory: frontend
+
+      - name: Frontend — build
+        run: npm run build
+        working-directory: frontend
+
+      - name: Upload frontend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  # ─── 2. Docker — build & push to GHCR ───────────────────────────────────────
+  docker:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: lint-test-build
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lowercase owner (GHCR requires lowercase)
+        id: vars
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ steps.vars.outputs.owner }}/inventory-backend:latest
+            ghcr.io/${{ steps.vars.outputs.owner }}/inventory-backend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          provenance: false
+          tags: |
+            ghcr.io/${{ steps.vars.outputs.owner }}/inventory-frontend:latest
+            ghcr.io/${{ steps.vars.outputs.owner }}/inventory-frontend:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── 3. Security scan ───────────────────────────────────────────────────────
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: docker
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lowercase owner
+        id: vars
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR (for image scans)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── npm audit (hard gate on high/critical; backend is currently clean) ──
+      - name: npm audit (backend)
+        run: |
+          set -o pipefail
+          npm audit --audit-level=high --omit=dev | tee npm-audit-backend.txt
+        working-directory: backend
+
+      # ── Trivy: filesystem (repo source) ──
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-fs.sarif
+
+      # ── Trivy: backend image ──
+      - name: Trivy backend image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ steps.vars.outputs.owner }}/inventory-backend:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-backend.sarif
+
+      # ── Trivy: frontend image ──
+      - name: Trivy frontend image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ steps.vars.outputs.owner }}/inventory-frontend:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: sarif
+          output: trivy-frontend.sarif
+
+      # ── SBOM (CycloneDX) for the repository ──
+      - name: Generate SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: cyclonedx
+          output: sbom.cdx.json
+
+      # ── Upload SARIF to the GitHub Security tab ──
+      - name: Upload SARIF (filesystem)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-filesystem
+
+      - name: Upload SARIF (backend image)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-backend.sarif
+          category: trivy-image-backend
+
+      - name: Upload SARIF (frontend image)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-frontend.sarif
+          category: trivy-image-frontend
+
+      - name: Upload reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-reports
+          path: |
+            npm-audit-backend.txt
+            trivy-fs.sarif
+            trivy-backend.sarif
+            trivy-frontend.sarif
+            sbom.cdx.json
+          retention-days: 14
+
+  # ─── 4. Compose validation (CD proxy: proves the stack becomes healthy) ─────
+  compose-validate:
+    name: Compose Validation
+    runs-on: ubuntu-latest
+    needs: docker
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate compose schema
+        run: docker compose -f docker-compose.yml config -q
+
+      - name: Build & start the stack (production base)
+        run: docker compose -f docker-compose.yml up -d --build
+
+      - name: Wait for backend health
+        run: |
+          echo "Polling http://localhost:8000/health ..."
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/health; then
+              echo -e "\nBackend healthy after ~$((i*5))s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Backend did not become healthy within 300s"
+          docker compose -f docker-compose.yml ps
+          docker compose -f docker-compose.yml logs --tail=200
+          exit 1
+
+      - name: Verify backend readiness (DB ping via nginx proxy too)
+        run: |
+          curl -fsS http://localhost:8000/health/ready
+          echo
+          echo "Verifying frontend -> backend proxy (/health via nginx on :9000) ..."
+          curl -fsS http://localhost:9000/health
+          echo
+
+      - name: Container status
+        run: docker compose -f docker-compose.yml ps
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f docker-compose.yml logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml down -v
+
+  # ─── 5. Notification ────────────────────────────────────────────────────────
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [lint-test-build, docker, security, compose-validate]
+    if: always()
+    steps:
+      - name: Build job summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          ## 🚦 CI/CD Pipeline Result
+
+          | Stage | Status |
+          | --- | --- |
+          EOF
+          echo "| 1. Lint / Test / Build | ${{ needs.lint-test-build.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 2. Docker build & push | ${{ needs.docker.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 3. Security scan       | ${{ needs.security.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 4. Compose validation  | ${{ needs.compose-validate.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: \`${{ github.sha }}\` on \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # Optional: email notification. Enable by adding MAIL_* secrets.
+      - name: Send email notification (optional)
+        if: ${{ env.MAIL_SERVER != '' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ env.MAIL_SERVER }}
+          server_port: ${{ env.MAIL_PORT }}
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "[CI] ${{ github.repository }} — ${{ needs.lint-test-build.result }} / ${{ needs.docker.result }} / ${{ needs.security.result }} / ${{ needs.compose-validate.result }}"
+          to: ${{ secrets.MAIL_TO }}
+          from: ${{ secrets.MAIL_FROM }}
+          body: "Pipeline for ${{ github.sha }} on ${{ github.ref_name }}. See ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        env:
+          MAIL_SERVER: ${{ secrets.MAIL_SERVER }}
+          MAIL_PORT: ${{ secrets.MAIL_PORT }}
+
+      # Fail this job (and thus the workflow) if any gating stage failed.
+      - name: Fail on upstream failure
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "::error::One or more pipeline stages failed."
+          exit 1

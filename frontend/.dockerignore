@@ -1,4 +1,30 @@
+# ── Dependencies (installed inside the image via npm ci) ──────────────────────
 node_modules
+
+# ── Build output (rebuilt inside the image) ───────────────────────────────────
 dist
-.env
+build
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
+npm-debug.log*
+
+# ── Secrets — never bake into the image ───────────────────────────────────────
+.env
+.env.*
+
+# ── Version control & metadata ────────────────────────────────────────────────
+.git
+.gitignore
+Dockerfile
+.dockerignore
+
+# ── Editor / OS cruft ─────────────────────────────────────────────────────────
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# ── Docs ──────────────────────────────────────────────────────────────────────
+README.md
+*.md

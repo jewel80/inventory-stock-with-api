@@ -1,0 +1,40 @@
+# =============================================================================
+# Development overrides — auto-loaded by `docker compose up`.
+# Skip it for a production-style run:
+#     docker compose -f docker-compose.yml up -d --build
+# =============================================================================
+services:
+  postgres:
+    # Expose Postgres on the host for prisma studio / GUI clients / debugging.
+    ports:
+      - "5432:5432"
+
+  backend:
+    build:
+      args:
+        # Install devDependencies (nodemon, pino-pretty, jest) into the image.
+        INSTALL_DEV: "true"
+    environment:
+      NODE_ENV: development
+      LOG_LEVEL: debug
+    # nodemon: restart on source change (hot reload). ENTRYPOINT still runs
+    # migrate → seed first, then `exec`s this command.
+    command: npm run dev
+    # Dev shouldn't be locked down; relaxed from base read_only:true.
+    read_only: false
+    volumes:
+      # Live source → reload without rebuilding the image.
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+      - ./backend/scripts:/app/scripts
+      # Anonymous volume: keep the container's node_modules (don't shadow it
+      # with the host's, which may have wrong-platform native binaries).
+      - /app/node_modules
+    ports:
+      - "8000:8000"
+      - "9229:9229"   # Node inspector — attach a debugger if needed
+
+  # Frontend keeps its production nginx build in Docker. For true HMR during
+  # development, run the Vite dev server on the host instead:
+  #     cd frontend && npm install && npm run dev
+  # (vite.config.js already proxies /api → http://localhost:8000).

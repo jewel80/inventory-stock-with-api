@@ -1,56 +1,98 @@
-services:
+# =============================================================================
+# Production-style base stack: PostgreSQL + API + nginx front-end.
+#
+# This file is the *base* definition. `docker compose up` ALSO auto-loads
+# docker-compose.override.yml (dev conveniences). For a production-style run
+# that skips the override, use:
+#     docker compose -f docker-compose.yml up -d --build
+#
+# Secrets/credentials here are placeholders for the local learning environment.
+# Override any ${VAR} via a root .env file or real environment variables.
+# =============================================================================
+name: inventory-stock
 
-  # ── PostgreSQL ─────────────────────────────────────────────────────────────
-  db:
+services:
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: inventorystock
-      POSTGRES_USER: inventory
-      POSTGRES_PASSWORD: inventory_secret
+      POSTGRES_DB: ${POSTGRES_DB:-inventorystock}
+      POSTGRES_USER: ${POSTGRES_USER:-inventory}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inventory_secret}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U inventory -d inventorystock"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-inventory} -d ${POSTGRES_DB:-inventorystock}"]
       interval: 5s
       timeout: 5s
       retries: 10
-    restart: unless-stopped
+      start_period: 10s
+    networks:
+      - appnet
+    # No host port published by default (security: DB stays internal to appnet).
+    # docker-compose.override.yml publishes 5432 for local debugging.
 
-  # ── Backend API ────────────────────────────────────────────────────────────
-  # On first start: runs prisma migrate deploy, seeds admin user + initial sync
+  # ── Backend API (Express + Prisma) ──────────────────────────────────────────
+  # On first start the entrypoint runs: prisma migrate deploy → seed → node.
   backend:
-    build: ./backend
+    image: ghcr.io/${IMAGE_OWNER:-local}/inventory-backend:${IMAGE_TAG:-latest}
+    build:
+      context: ./backend
+    restart: unless-stopped
+    # DATABASE_URL is composed from the same interpolation vars as postgres,
+    # so the credentials can never drift between the two services.
     environment:
-      DATABASE_URL: postgresql://inventory:inventory_secret@db:5432/inventorystock
-      JWT_SECRET: change-me-to-a-long-random-secret-before-production
-      SUPPLIER_API_URL: https://dummyjson.com
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-inventory}:${POSTGRES_PASSWORD:-inventory_secret}@postgres:5432/${POSTGRES_DB:-inventorystock}
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-secret}
+      SUPPLIER_API_URL: ${SUPPLIER_API_URL:-https://dummyjson.com}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:9000}
       PORT: 8000
-      FRONTEND_URL: http://localhost:9000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
+    # Hardening: non-root (Dockerfile USER node) + read-only root FS.
+    read_only: true
+    tmpfs:
+      - /tmp
     healthcheck:
-      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:8000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\""]
+      test: ["CMD", "node", "-e", "const h=require('http');h.get('http://127.0.0.1:8000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 90s    # allow time for migration + initial sync (~194 products) on first run
-    restart: unless-stopped
+      start_period: 90s   # first run: migrate + supplier sync (~194 products)
+    networks:
+      - appnet
 
-  # ── React Frontend (nginx) ─────────────────────────────────────────────────
-  # nginx serves the built React app and proxies /api/* to the backend
+  # ── Frontend (React SPA via non-root nginx) ─────────────────────────────────
+  # nginx serves the built bundle and proxies /api/* + /health to the backend.
   frontend:
-    build: ./frontend
-    ports:
-      - "9000:80"
+    image: ghcr.io/${IMAGE_OWNER:-local}/inventory-frontend:${IMAGE_TAG:-latest}
+    build:
+      context: ./frontend
+    restart: unless-stopped
     depends_on:
       backend:
         condition: service_healthy
-    restart: unless-stopped
+    ports:
+      - "9000:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks:
+      - appnet
 
 volumes:
   pgdata:
+    name: inventory-stock_pgdata
+
+networks:
+  appnet:
+    driver: bridge
